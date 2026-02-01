@@ -1,0 +1,39 @@
+# MotionBERT-OpenSim Requirements
+# =============================================================================
+#
+# INSTALLATION ORDER:
+#
+# 1. Install PyTorch with CUDA (choose your CUDA version):
+#
+#    CUDA 11.8:
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#
+#    CUDA 12.1:
+#    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#
+#    CPU only:
+#    pip install torch torchvision
+#
+# 2. Install other dependencies:
+#    pip install -r requirements.txt
+#
+# =============================================================================
+
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+tqdm>=4.65.0
+
+# YOLOv8 for 2D pose detection
+ultralytics>=8.0.0
+
+# Config handling (for MotionBERT)
+pyyaml>=6.0
+easydict>=1.10
+
+# Biomechanics / OpenSim interface
+pose2sim>=0.10.0
+
+# Optional: for additional analysis
+# scipy>=1.10.0
+# matplotlib>=3.7.0
