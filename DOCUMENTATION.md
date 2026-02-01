@@ -2,7 +2,7 @@
 
 **Version:** 1.0
 **Date:** 2026-02-01
-**Author:** Generated with Claude Code assistance
+**Author:** Aitor Iriondo Pascual
 
 ---
 
