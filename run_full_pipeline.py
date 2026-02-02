@@ -19,6 +19,19 @@ Usage:
 
 import os
 import sys
+
+# Shim for pyopensim -> opensim module aliasing
+# pyopensim provides OpenSim bindings but separates API into submodules
+# We need to expose everything at top level like the official opensim package
+try:
+    import opensim
+except ImportError:
+    # Use our custom shim that properly exposes all submodule contents
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.absolute()))
+    import opensim_shim
+    sys.modules['opensim'] = opensim_shim
+
 import shutil
 import time
 import pickle
@@ -264,8 +277,14 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
         return flipped
 
     with torch.no_grad():
+        # Track how many frames we've collected
+        frames_collected = 0
+
         for start in range(0, n_frames, stride):
             end = min(start + clip_len, n_frames)
+            original_start = start
+
+            # If clip is shorter than clip_len, shift start back
             if end - start < clip_len:
                 start = max(0, end - clip_len)
 
@@ -283,17 +302,29 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
 
             output = pred.cpu().numpy()[0]
 
-            if start == 0:
+            if original_start == 0:
+                # First window: keep from start to middle of overlap region
                 keep_end = min(stride + stride // 2, n_frames) if n_frames > clip_len else n_frames
                 outputs.append(output[:keep_end])
-            elif end >= n_frames:
-                keep_start = clip_len - (n_frames - start)
-                outputs.append(output[keep_start:])
+                frames_collected = keep_end
+            elif frames_collected >= n_frames:
+                # Already have all frames, stop
                 break
             else:
-                keep_start = stride // 2
-                keep_end = keep_start + stride
-                outputs.append(output[keep_start:keep_end])
+                # Calculate how many frames we still need
+                frames_needed = n_frames - frames_collected
+
+                # Calculate offset within this window for where our needed frames start
+                # The window covers [start, start+clip_len), we need frames starting at frames_collected
+                offset_in_window = frames_collected - start
+
+                # Take only what we need
+                keep_count = min(frames_needed, clip_len - offset_in_window)
+                outputs.append(output[offset_in_window:offset_in_window + keep_count])
+                frames_collected += keep_count
+
+                if frames_collected >= n_frames:
+                    break
 
     keypoints_3d = np.concatenate(outputs, axis=0)[:n_frames]
 
@@ -317,6 +348,22 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
     if timed:
         timings['4_normalize_bones'] = time.perf_counter() - t0
         print(f"  Time: {format_time(timings['4_normalize_bones'])}")
+
+    # =========================================================================
+    # STEP 4b: Forward Lean Correction
+    # =========================================================================
+    print("\n" + "=" * 70)
+    print("STEP 4b: Forward Lean Correction")
+    print("=" * 70)
+
+    t0 = time.perf_counter()
+
+    from trc_motionbert import correct_forward_lean
+    keypoints_3d = correct_forward_lean(keypoints_3d)
+
+    if timed:
+        timings['4b_lean_correction'] = time.perf_counter() - t0
+        print(f"  Time: {format_time(timings['4b_lean_correction'])}")
 
     # =========================================================================
     # STEP 5: Coordinate Transformation

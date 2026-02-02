@@ -280,6 +280,276 @@ def normalize_bone_lengths(keypoints: np.ndarray) -> np.ndarray:
     return normalized
 
 
+def enforce_anthropometric_proportions(keypoints: np.ndarray) -> np.ndarray:
+    """
+    Enforce anatomically correct body proportions on the skeleton.
+
+    Monocular 3D pose estimation often produces skeletons with incorrect segment
+    proportions, particularly overestimating leg length relative to torso in the
+    vertical direction. This function rescales leg segments to match standard
+    human anthropometric ratios.
+
+    The key insight is that in MotionBERT output:
+    - Y axis is vertical (positive = down)
+    - Leg bones are nearly 100% vertical (walking gait)
+    - Torso bones have significant depth/lateral components
+
+    We use VERTICAL distances (Y component) for proportion calculation, not
+    Euclidean distances, to avoid distortion from forward lean.
+
+    Standard human proportions (Winter, 2009; Drillis & Contini, 1966):
+        - Torso (hip to shoulder): ~30% of height
+        - Thigh (hip to knee): ~24.5% of height
+        - Shin (knee to ankle): ~24.6% of height
+        - Head above shoulders: ~12.5% of height (from shoulder to top of head)
+
+    H36M joint indices:
+        0: Hip, 1: RHip, 2: RKnee, 3: RAnkle, 4: LHip, 5: LKnee, 6: LAnkle,
+        7: Spine, 8: Thorax, 9: Neck, 10: Head, 11: LShoulder, 12: LElbow,
+        13: LWrist, 14: RShoulder, 15: RElbow, 16: RWrist
+
+    Args:
+        keypoints: Array of shape (n_frames, 17, 3) in MotionBERT coords (Y=down)
+
+    Returns:
+        Keypoints with corrected anthropometric proportions
+    """
+    n_frames = keypoints.shape[0]
+    corrected = keypoints.copy()
+
+    # Standard anthropometric ratios as fraction of total height
+    RATIO_TORSO = 0.30      # Hip center to shoulder center (vertical)
+    RATIO_HEAD = 0.125      # Shoulder to head top (vertical)
+    RATIO_UPPER = RATIO_TORSO + RATIO_HEAD  # ~0.425 upper body
+    RATIO_LEG = 0.49        # Total leg (thigh + shin)
+    RATIO_THIGH = 0.245     # Hip joint to knee
+    RATIO_SHIN = 0.246      # Knee to ankle
+
+    # Compute VERTICAL heights (Y axis in MotionBERT, positive = down)
+    # Hip center
+    hip_y = keypoints[:, 0, 1].mean()
+
+    # Shoulder center
+    l_shoulder_y = keypoints[:, 11, 1].mean()
+    r_shoulder_y = keypoints[:, 14, 1].mean()
+    shoulder_y = (l_shoulder_y + r_shoulder_y) / 2
+
+    # Head
+    head_y = keypoints[:, 10, 1].mean()
+
+    # Ankles
+    l_ankle_y = keypoints[:, 6, 1].mean()
+    r_ankle_y = keypoints[:, 3, 1].mean()
+    ankle_y = (l_ankle_y + r_ankle_y) / 2
+
+    # Vertical torso = shoulder - hip (negative because Y=down)
+    vert_torso = hip_y - shoulder_y  # Positive value
+    vert_head = shoulder_y - head_y   # Positive value (head above shoulder)
+    vert_upper = vert_torso + vert_head
+
+    # Vertical leg = ankle - hip (positive because ankle has higher Y)
+    vert_leg = ankle_y - hip_y
+
+    # Total vertical height
+    vert_height = vert_upper + vert_leg
+
+    # Estimate correct height from upper body (more reliable)
+    # Upper body should be ~42.5% of height
+    estimated_height = vert_upper / RATIO_UPPER
+
+    # Target leg length from estimated height
+    target_leg_vertical = RATIO_LEG * estimated_height
+
+    # Scale factor for legs (based on vertical component)
+    leg_scale = target_leg_vertical / vert_leg if vert_leg > 0.01 else 1.0
+
+    print(f"  Enforcing anthropometric proportions (vertical analysis):")
+    print(f"    Vertical upper body: {vert_upper:.3f}m ({vert_upper/vert_height*100:.1f}% of current height)")
+    print(f"    Vertical leg: {vert_leg:.3f}m ({vert_leg/vert_height*100:.1f}% of current height)")
+    print(f"    Estimated correct height: {estimated_height:.3f}m (from upper body)")
+    print(f"    Target leg vertical: {target_leg_vertical:.3f}m ({RATIO_LEG*100:.1f}%)")
+    print(f"    Leg scale factor: {leg_scale:.3f}")
+
+    # Apply uniform leg scaling to maintain joint angles while fixing proportions
+    # Scale both thigh and shin by the same factor
+    for frame in range(n_frames):
+        # Get hip positions (reference points for legs)
+        r_hip = corrected[frame, 1]
+        l_hip = corrected[frame, 4]
+
+        # Right leg: scale knee and ankle positions relative to hip
+        r_knee_dir = corrected[frame, 2] - r_hip
+        r_shin_dir = corrected[frame, 3] - corrected[frame, 2]
+
+        # Scale knee position
+        corrected[frame, 2] = r_hip + r_knee_dir * leg_scale
+        # Scale ankle position (relative to new knee)
+        new_r_shin_dir = r_shin_dir * leg_scale
+        corrected[frame, 3] = corrected[frame, 2] + new_r_shin_dir
+
+        # Left leg: scale knee and ankle positions relative to hip
+        l_knee_dir = corrected[frame, 5] - l_hip
+        l_shin_dir = corrected[frame, 6] - corrected[frame, 5]
+
+        # Scale knee position
+        corrected[frame, 5] = l_hip + l_knee_dir * leg_scale
+        # Scale ankle position (relative to new knee)
+        new_l_shin_dir = l_shin_dir * leg_scale
+        corrected[frame, 6] = corrected[frame, 5] + new_l_shin_dir
+
+    # Report final proportions
+    new_ankle_y = (corrected[:, 3, 1].mean() + corrected[:, 6, 1].mean()) / 2
+    new_vert_leg = new_ankle_y - hip_y
+    new_vert_height = vert_upper + new_vert_leg
+
+    print(f"    After correction:")
+    print(f"      New vertical height: {new_vert_height:.3f}m")
+    print(f"      New vertical leg: {new_vert_leg:.3f}m ({new_vert_leg/new_vert_height*100:.1f}%)")
+    print(f"      Upper body: {vert_upper:.3f}m ({vert_upper/new_vert_height*100:.1f}%)")
+
+    return corrected
+
+
+def correct_forward_lean(keypoints: np.ndarray) -> np.ndarray:
+    """
+    Correct systematic forward/backward lean from monocular depth estimation.
+
+    Monocular 3D pose estimation often produces a consistent tilt toward or away
+    from the camera due to depth ambiguity. This function corrects this by:
+    1. Computing the average spine tilt (hip-to-shoulder vector) across all frames
+    2. Computing the average ground plane tilt from ankle positions
+    3. Applying a rotation to make the spine vertical and ground horizontal
+
+    The correction assumes:
+    - During normal walking, the average torso should be roughly vertical
+    - The ground plane (defined by feet) should be horizontal
+
+    H36M joint indices:
+        0: Hip (pelvis center), 7: Spine, 8: Thorax
+        3: RAnkle, 6: LAnkle
+        11: LShoulder, 14: RShoulder
+
+    MotionBERT coordinates:
+        X = lateral (right positive)
+        Y = vertical (down positive)
+        Z = depth (forward/away from camera positive)
+
+    Args:
+        keypoints: Array of shape (n_frames, 17, 3) in MotionBERT coordinates
+
+    Returns:
+        Corrected keypoints with lean removed
+    """
+    n_frames = keypoints.shape[0]
+    corrected = keypoints.copy()
+
+    # H36M indices
+    HIP = 0
+    SPINE = 7
+    THORAX = 8
+    L_SHOULDER = 11
+    R_SHOULDER = 14
+    L_ANKLE = 6
+    R_ANKLE = 3
+
+    # === Method 1: Spine verticality ===
+    # Compute average spine direction (hip to shoulder center)
+    hip_positions = keypoints[:, HIP, :]
+    l_shoulder = keypoints[:, L_SHOULDER, :]
+    r_shoulder = keypoints[:, R_SHOULDER, :]
+    shoulder_center = (l_shoulder + r_shoulder) / 2
+
+    spine_vectors = shoulder_center - hip_positions  # Points upward (negative Y in MotionBERT)
+    avg_spine = np.mean(spine_vectors, axis=0)
+    avg_spine = avg_spine / (np.linalg.norm(avg_spine) + 1e-8)
+
+    # The ideal spine direction should be purely vertical: [0, -1, 0] (up in MotionBERT coords)
+    ideal_spine = np.array([0, -1, 0])
+
+    # === Method 2: Ground plane from ankles ===
+    # Compute average ankle positions to estimate ground plane tilt
+    l_ankle = keypoints[:, L_ANKLE, :]
+    r_ankle = keypoints[:, R_ANKLE, :]
+
+    # Ground plane normal should point up [0, -1, 0]
+    # We estimate tilt from the average ankle height difference in Z (depth) direction
+    avg_l_ankle = np.mean(l_ankle, axis=0)
+    avg_r_ankle = np.mean(r_ankle, axis=0)
+
+    # If one ankle is consistently further in Z (depth), it suggests forward lean
+    # Combined approach: use both spine and ground information
+
+    # === Compute rotation to correct lean ===
+    # We need to rotate avg_spine to align with ideal_spine
+    # This is a rotation around the X-axis (lateral axis) primarily
+
+    # Compute the forward lean angle from spine
+    # Project spine onto YZ plane (sagittal plane)
+    spine_yz = np.array([0, avg_spine[1], avg_spine[2]])
+    spine_yz = spine_yz / (np.linalg.norm(spine_yz) + 1e-8)
+
+    # Angle between spine_yz and ideal vertical [0, -1, 0]
+    # In MotionBERT: Y down positive, Z forward positive
+    # Spine points from hip toward shoulders (should be mostly negative Y = upward)
+    # If Z is negative, spine tilts backward (toward camera)
+    # If Z is positive, spine tilts forward (away from camera)
+    # We want to rotate the spine to have Z=0 (purely vertical)
+    lean_angle_spine = np.arctan2(spine_yz[2], -spine_yz[1])
+
+    # Compute lean from ankle depth difference (as secondary check)
+    # If both ankles have similar Y but different Z during stance, suggests tilt
+    ankle_z_diff = avg_r_ankle[2] - avg_l_ankle[2]  # Lateral difference in depth
+    ankle_y_mean = (avg_l_ankle[1] + avg_r_ankle[1]) / 2
+
+    # Weight the spine-based correction more heavily (it's more reliable)
+    lean_angle = lean_angle_spine
+
+    print(f"  Correcting forward lean:")
+    print(f"    Average spine direction: [{avg_spine[0]:.3f}, {avg_spine[1]:.3f}, {avg_spine[2]:.3f}]")
+    print(f"    Lean angle (from spine): {np.degrees(lean_angle_spine):.1f}°")
+    print(f"    Applying correction: {np.degrees(lean_angle):.1f}° rotation around X-axis")
+
+    # Create rotation matrix around X-axis to correct the lean
+    # We rotate BY lean_angle (not negative) to bring spine Z component to zero
+    # Rotation around X-axis: rotates Y toward Z with positive angle
+    cos_a = np.cos(lean_angle)
+    sin_a = np.sin(lean_angle)
+    R_x = np.array([
+        [1, 0, 0],
+        [0, cos_a, -sin_a],
+        [0, sin_a, cos_a]
+    ])
+
+    # Apply rotation to all keypoints
+    # First, center on hip, rotate, then restore position
+    for frame in range(n_frames):
+        hip_pos = corrected[frame, HIP, :].copy()
+
+        # Translate to origin (hip-centered)
+        for j in range(17):
+            corrected[frame, j, :] -= hip_pos
+
+        # Apply rotation
+        for j in range(17):
+            corrected[frame, j, :] = R_x @ corrected[frame, j, :]
+
+        # Translate back
+        for j in range(17):
+            corrected[frame, j, :] += hip_pos
+
+    # Verify correction
+    new_spine_vectors = (corrected[:, L_SHOULDER, :] + corrected[:, R_SHOULDER, :]) / 2 - corrected[:, HIP, :]
+    new_avg_spine = np.mean(new_spine_vectors, axis=0)
+    new_avg_spine = new_avg_spine / (np.linalg.norm(new_avg_spine) + 1e-8)
+    new_lean = np.arctan2(new_avg_spine[2], -new_avg_spine[1])
+
+    print(f"    After correction:")
+    print(f"      New spine direction: [{new_avg_spine[0]:.3f}, {new_avg_spine[1]:.3f}, {new_avg_spine[2]:.3f}]")
+    print(f"      Residual lean: {np.degrees(new_lean):.1f}°")
+
+    return corrected
+
+
 def compute_body_frame_rotation(keypoints: np.ndarray, reference_frames: int = 10) -> np.ndarray:
     """
     Compute rotation matrix from body orientation in first N frames.
