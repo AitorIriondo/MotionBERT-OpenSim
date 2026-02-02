@@ -547,7 +547,16 @@ def correct_forward_lean(keypoints: np.ndarray) -> np.ndarray:
     print(f"      New spine direction: [{new_avg_spine[0]:.3f}, {new_avg_spine[1]:.3f}, {new_avg_spine[2]:.3f}]")
     print(f"      Residual lean: {np.degrees(new_lean):.1f}°")
 
-    return corrected
+    # Return correction info for reporting
+    correction_info = {
+        'original_spine': f"{avg_spine[0]:.3f}, {avg_spine[1]:.3f}, {avg_spine[2]:.3f}",
+        'lean_angle_deg': np.degrees(lean_angle_spine),
+        'correction_deg': np.degrees(lean_angle),
+        'new_spine': f"{new_avg_spine[0]:.3f}, {new_avg_spine[1]:.3f}, {new_avg_spine[2]:.3f}",
+        'residual_deg': np.degrees(new_lean),
+    }
+
+    return corrected, correction_info
 
 
 def compute_body_frame_rotation(keypoints: np.ndarray, reference_frames: int = 10) -> np.ndarray:
@@ -714,10 +723,20 @@ def transform_motionbert_to_opensim(keypoints: np.ndarray, target_height: float 
 
     print(f"  Current skeleton height: {current_height:.3f}m")
 
+    scaling_info = {
+        'original_height': current_height,
+        'target_height': target_height,
+        'scale_factor': 1.0,
+        'final_height': current_height,
+    }
+
     if current_height > 0.1:  # Sanity check
         scale = target_height / current_height
         transformed *= scale
         print(f"  Scaling by {scale:.3f} to target height {target_height:.3f}m")
+
+        scaling_info['scale_factor'] = scale
+        scaling_info['final_height'] = target_height
 
         # Re-ground feet after scaling
         foot_y_min = min(transformed[:, 3, 1].min(), transformed[:, 6, 1].min())
@@ -729,7 +748,7 @@ def transform_motionbert_to_opensim(keypoints: np.ndarray, target_height: float 
     else:
         print(f"  Warning: Height too small ({current_height:.3f}m), not scaling")
 
-    return transformed
+    return transformed, scaling_info
 
 
 def extract_coco17_markers(h36m_keypoints: np.ndarray) -> Tuple[List[str], np.ndarray]:

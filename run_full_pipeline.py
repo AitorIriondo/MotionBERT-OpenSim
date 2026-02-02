@@ -35,8 +35,10 @@ except ImportError:
 import shutil
 import time
 import pickle
+import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Any, Optional
+from datetime import datetime
 import argparse
 
 import numpy as np
@@ -63,13 +65,192 @@ def format_time(seconds: float) -> str:
         return f"{seconds/60:.1f} min"
 
 
-def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
+def generate_output_dir_name(video_path: Path, base_dir: Path = None) -> Path:
+    """Generate output directory name as output_YYYYMMDD_HHMMSS_videoname."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    video_name = video_path.stem  # filename without extension
+    dir_name = f"output_{timestamp}_{video_name}"
+
+    if base_dir is None:
+        base_dir = video_path.parent
+
+    return base_dir / dir_name
+
+
+def generate_report(
+    output_dir: Path,
+    video_path: Path,
+    video_info: Dict[str, Any],
+    target_height: float,
+    device: str,
+    timings: Dict[str, float],
+    corrections: Dict[str, Any],
+    errors: List[str],
+    warnings: List[str],
+) -> Path:
+    """Generate a detailed processing report."""
+
+    report_path = output_dir / "processing_report.txt"
+    json_path = output_dir / "processing_report.json"
+
+    total_time = sum(timings.values()) if timings else 0
+    n_frames = video_info.get('n_frames', 0)
+    duration = video_info.get('duration', 0)
+
+    # Text report (UTF-8 encoding for degree symbols etc.)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write("=" * 70 + "\n")
+        f.write("MOTIONBERT-OPENSIM PROCESSING REPORT\n")
+        f.write("=" * 70 + "\n\n")
+
+        # Metadata
+        f.write("METADATA\n")
+        f.write("-" * 70 + "\n")
+        f.write(f"  Generated:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"  Input video:       {video_path}\n")
+        f.write(f"  Output directory:  {output_dir}\n")
+        f.write(f"  Target height:     {target_height} m\n")
+        f.write(f"  Device:            {device}\n\n")
+
+        # Video info
+        f.write("VIDEO INFORMATION\n")
+        f.write("-" * 70 + "\n")
+        f.write(f"  Resolution:        {video_info.get('width', 'N/A')}x{video_info.get('height', 'N/A')}\n")
+        f.write(f"  Frame rate:        {video_info.get('fps', 'N/A'):.2f} FPS\n")
+        f.write(f"  Total frames:      {n_frames}\n")
+        f.write(f"  Duration:          {duration:.2f} seconds\n\n")
+
+        # Corrections applied
+        f.write("CORRECTIONS APPLIED\n")
+        f.write("-" * 70 + "\n")
+        if corrections:
+            if 'lean_correction' in corrections:
+                lc = corrections['lean_correction']
+                f.write(f"  Forward lean correction:\n")
+                f.write(f"    Original spine direction:  [{lc.get('original_spine', 'N/A')}]\n")
+                f.write(f"    Lean angle detected:       {lc.get('lean_angle_deg', 'N/A'):.1f}°\n")
+                f.write(f"    Correction applied:        {lc.get('correction_deg', 'N/A'):.1f}° around X-axis\n")
+                f.write(f"    Residual lean:             {lc.get('residual_deg', 'N/A'):.1f}°\n")
+            if 'bone_normalization' in corrections:
+                bn = corrections['bone_normalization']
+                f.write(f"  Bone length normalization:\n")
+                f.write(f"    CV before:                 {bn.get('cv_before', 'N/A'):.1f}%\n")
+                f.write(f"    CV after:                  {bn.get('cv_after', 'N/A'):.1f}%\n")
+            if 'scaling' in corrections:
+                sc = corrections['scaling']
+                f.write(f"  Height scaling:\n")
+                f.write(f"    Original height:           {sc.get('original_height', 'N/A'):.3f} m\n")
+                f.write(f"    Scale factor:              {sc.get('scale_factor', 'N/A'):.3f}\n")
+                f.write(f"    Final height:              {sc.get('final_height', 'N/A'):.3f} m\n")
+        else:
+            f.write("  No correction data recorded\n")
+        f.write("\n")
+
+        # Processing times
+        f.write("PROCESSING TIMES\n")
+        f.write("-" * 70 + "\n")
+        if timings:
+            f.write(f"  {'Step':<45} {'Time':>12} {'%':>8}\n")
+            f.write("  " + "-" * 65 + "\n")
+            for step, t in timings.items():
+                pct = (t / total_time) * 100 if total_time > 0 else 0
+                f.write(f"  {step:<45} {format_time(t):>12} {pct:>7.1f}%\n")
+            f.write("  " + "-" * 65 + "\n")
+            f.write(f"  {'TOTAL':<45} {format_time(total_time):>12} {'100.0%':>8}\n\n")
+
+            if n_frames > 0 and total_time > 0:
+                f.write(f"  Processing speed:  {n_frames/total_time:.1f} FPS\n")
+                f.write(f"  Real-time factor:  {duration/total_time:.2f}x\n\n")
+        else:
+            f.write("  No timing data recorded\n\n")
+
+        # Errors and warnings
+        f.write("ERRORS\n")
+        f.write("-" * 70 + "\n")
+        if errors:
+            for err in errors:
+                f.write(f"  [ERROR] {err}\n")
+        else:
+            f.write("  No errors\n")
+        f.write("\n")
+
+        f.write("WARNINGS\n")
+        f.write("-" * 70 + "\n")
+        if warnings:
+            for warn in warnings:
+                f.write(f"  [WARNING] {warn}\n")
+        else:
+            f.write("  No warnings\n")
+        f.write("\n")
+
+        # Output files
+        f.write("OUTPUT FILES\n")
+        f.write("-" * 70 + "\n")
+        for fpath in sorted(output_dir.rglob("*")):
+            if fpath.is_file() and fpath.name != "processing_report.txt" and fpath.name != "processing_report.json":
+                size_kb = fpath.stat().st_size / 1024
+                f.write(f"  {fpath.relative_to(output_dir)} ({size_kb:.1f} KB)\n")
+        f.write("\n")
+
+        f.write("=" * 70 + "\n")
+        f.write("END OF REPORT\n")
+        f.write("=" * 70 + "\n")
+
+    # Convert numpy types to Python native types for JSON serialization
+    def convert_to_native(obj):
+        if isinstance(obj, dict):
+            return {k: convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_native(v) for v in obj]
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    # JSON report for programmatic access
+    json_report = {
+        "metadata": {
+            "generated": datetime.now().isoformat(),
+            "input_video": str(video_path),
+            "output_directory": str(output_dir),
+            "target_height": float(target_height),
+            "device": device,
+        },
+        "video_info": convert_to_native(video_info),
+        "corrections": convert_to_native(corrections),
+        "timings": {k: round(float(v), 4) for k, v in timings.items()} if timings else {},
+        "total_time": round(float(total_time), 4),
+        "processing_fps": round(float(n_frames / total_time), 2) if total_time > 0 else 0,
+        "realtime_factor": round(float(duration / total_time), 2) if total_time > 0 else 0,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+    with open(json_path, 'w') as f:
+        json.dump(json_report, f, indent=2)
+
+    return report_path
+
+
+def run_pipeline(video_path: str, output_dir: str = None, target_height: float = 1.75,
                  device: str = 'cuda:0', timed: bool = True):
     """Run the full video to OpenSim pipeline."""
 
     video_path = Path(video_path)
-    output_dir = Path(output_dir)
+
+    # Auto-generate output directory name if not specified or if using default
+    if output_dir is None or output_dir == 'output/pipeline_output':
+        output_dir = generate_output_dir_name(video_path)
+    else:
+        output_dir = Path(output_dir)
+
     timings = {}
+    corrections = {}
+    errors = []
+    warnings = []
 
     # Clean output directory
     if output_dir.exists():
@@ -89,6 +270,7 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
         if torch.cuda.is_available():
             print(f"CUDA available: {torch.cuda.get_device_name(0)}")
         else:
+            warnings.append("CUDA not available, falling back to CPU")
             print("WARNING: CUDA not available, using CPU")
             device = 'cpu'
 
@@ -100,6 +282,15 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
     n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = n_frames / fps
     cap.release()
+
+    # Store video info for report
+    video_info = {
+        'width': width,
+        'height': height,
+        'fps': fps,
+        'n_frames': n_frames,
+        'duration': duration,
+    }
 
     print(f"\nVideo info:")
     print(f"  Resolution: {width}x{height}")
@@ -359,7 +550,8 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
     t0 = time.perf_counter()
 
     from trc_motionbert import correct_forward_lean
-    keypoints_3d = correct_forward_lean(keypoints_3d)
+    keypoints_3d, lean_correction_info = correct_forward_lean(keypoints_3d)
+    corrections['lean_correction'] = lean_correction_info
 
     if timed:
         timings['4b_lean_correction'] = time.perf_counter() - t0
@@ -375,7 +567,8 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
     t0 = time.perf_counter()
 
     from trc_motionbert import transform_motionbert_to_opensim
-    keypoints_osim = transform_motionbert_to_opensim(keypoints_3d, target_height, use_simple_transform=True)
+    keypoints_osim, scaling_info = transform_motionbert_to_opensim(keypoints_3d, target_height, use_simple_transform=True)
+    corrections['scaling'] = scaling_info
 
     if timed:
         timings['5_transform_coords'] = time.perf_counter() - t0
@@ -509,17 +702,42 @@ def run_pipeline(video_path: str, output_dir: str, target_height: float = 1.75,
     if osim_files:
         print(f"*** Scaled model: {osim_files[0]} ***")
 
+    # Generate report
+    report_path = generate_report(
+        output_dir=output_dir,
+        video_path=video_path,
+        video_info=video_info,
+        target_height=target_height,
+        device=device,
+        timings=timings,
+        corrections=corrections,
+        errors=errors,
+        warnings=warnings,
+    )
+    print(f"\n*** Report: {report_path} ***")
+
     print("\n" + "=" * 70)
     print("DONE! Open the .osim file in OpenSim GUI, then load the .mot file")
     print("=" * 70)
 
-    return timings
+    return timings, corrections, errors, warnings
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Full Pipeline: Video -> OpenSim')
+    parser = argparse.ArgumentParser(
+        description='Full Pipeline: Video -> OpenSim',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    # Auto-generate output folder (output_YYYYMMDD_HHMMSS_videoname)
+    python run_full_pipeline.py --input video.mp4 --height 1.75
+
+    # Specify output folder
+    python run_full_pipeline.py --input video.mp4 --output results/my_output --height 1.75
+""")
     parser.add_argument('--input', '-i', required=True, help='Input video path')
-    parser.add_argument('--output', '-o', default='output/pipeline_output', help='Output directory')
+    parser.add_argument('--output', '-o', default=None,
+                        help='Output directory (default: auto-generated as output_YYYYMMDD_HHMMSS_videoname)')
     parser.add_argument('--height', type=float, default=1.75, help='Target height in meters')
     parser.add_argument('--device', '-d', default='cuda:0', help='Device (cuda:0 or cpu)')
     parser.add_argument('--no-timing', action='store_true', help='Disable timing output')
