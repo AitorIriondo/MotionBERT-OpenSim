@@ -1356,6 +1356,157 @@ time	pelvis_tilt	pelvis_list	pelvis_rotation	pelvis_tx	pelvis_ty	pelvis_tz	...
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-02-01 | Initial comprehensive documentation |
+| 1.1 | 2026-02-02 | Added forward lean correction, sliding window fix, auto output folders, reports |
+
+---
+
+## Appendix D: Updates from 2026-02-02 Session
+
+### D.1 New Features Added
+
+#### D.1.1 Auto-Generated Output Folder Names
+Output directories are now automatically named as `output_YYYYMMDD_HHMMSS_videoname` when `--output` is not specified.
+
+```bash
+# Auto-generate output folder
+python run_full_pipeline.py --input video.mp4 --height 1.75
+
+# Custom output folder
+python run_full_pipeline.py --input video.mp4 --output results/my_output --height 1.75
+```
+
+#### D.1.2 Processing Reports
+Each run generates detailed reports:
+
+**Text report (`processing_report.txt`):**
+- Metadata (input video, height, device)
+- Video information (resolution, FPS, frames, duration)
+- Corrections applied (lean angle, scaling)
+- Processing times breakdown with percentages
+- Errors and warnings
+- Output files list
+
+**JSON report (`processing_report.json`):**
+- Same data in machine-readable format for programmatic access
+
+#### D.1.3 Forward Lean Correction
+New step (4b) corrects systematic camera-facing tilt from monocular depth estimation:
+
+```python
+def correct_forward_lean(keypoints: np.ndarray) -> Tuple[np.ndarray, dict]:
+    """
+    Correct systematic forward/backward lean from monocular depth estimation.
+
+    Algorithm:
+    1. Compute average spine direction across all frames
+    2. Calculate lean angle from spine projection onto sagittal (YZ) plane
+    3. Apply rotation correction around X-axis to verticalize spine
+    """
+```
+
+Typical correction: ~16-17° for side-view walking videos.
+
+### D.2 Bug Fixes
+
+#### D.2.1 Sliding Window Motion Repetition
+**Problem:** Last portion of video was repeated in the output motion.
+
+**Cause:** Incorrect frame tracking in sliding window inference loop. When the final window was computed, the code was outputting more frames than needed.
+
+**Fix:** Track `frames_collected` and only take exactly the frames needed to reach `n_frames`:
+
+```python
+# Track how many frames we've collected
+frames_collected = 0
+
+for start in range(0, n_frames, stride):
+    # ... inference code ...
+
+    if original_start == 0:
+        # First window
+        outputs.append(output[:keep_end])
+        frames_collected = keep_end
+    else:
+        # Calculate how many frames we still need
+        frames_needed = n_frames - frames_collected
+        offset_in_window = frames_collected - start
+        keep_count = min(frames_needed, clip_len - offset_in_window)
+        outputs.append(output[offset_in_window:offset_in_window + keep_count])
+        frames_collected += keep_count
+
+        if frames_collected >= n_frames:
+            break
+```
+
+#### D.2.2 Forward Lean Rotation Direction
+**Problem:** Initial forward lean correction was applied in wrong direction, making lean worse.
+
+**Fix:** Changed rotation to apply `lean_angle` directly (not `-lean_angle`) when spine Z component is negative.
+
+### D.3 pyopensim Compatibility
+
+Created `opensim_shim.py` to handle differences between `pyopensim` package and official `opensim`:
+
+```python
+# opensim_shim.py
+import pyopensim
+from pyopensim import *
+from pyopensim.common import *
+from pyopensim.simulation import *
+from pyopensim.tools import *
+from pyopensim.actuators import *
+from pyopensim.analyses import *
+from pyopensim.common import Logger, LogSink, StringLogSink
+__version__ = pyopensim.__version__
+```
+
+The shim is loaded automatically if `import opensim` fails.
+
+### D.4 Pre-Scaling Removal
+
+**Previous behavior:** Step 5 scaled the skeleton based on `head_y - foot_y` before Pose2Sim.
+
+**Problem:** For unusual poses (e.g., Pilates with person bent over), `head_y - foot_y` doesn't represent standing height, causing extreme scaling (7x observed).
+
+**Solution:** Removed pre-scaling, delegating all scaling to Pose2Sim's `participant_height` parameter.
+
+```python
+# Note: We do NOT scale here - let Pose2Sim handle scaling
+# This avoids issues with unusual poses where head-to-foot height
+# doesn't reflect standing height
+```
+
+### D.5 Known Limitations
+
+#### D.5.1 Unusual Pose Scaling
+For videos with non-standard poses (e.g., Pilates, yoga, gymnastics), Pose2Sim's marker-based scaling may produce incorrect segment sizes for head and feet since there are no markers directly on these body parts.
+
+The default Pose2Sim scaling works well for normal walking/standing videos but may have issues with:
+- Extreme poses (inverted, bent over, etc.)
+- Vertical/portrait videos
+- People on elevated platforms
+
+#### D.5.2 Head Wobble
+Monocular depth estimation causes head position to fluctuate laterally. This manifests as head tilting side-to-side in the output motion. Potential solutions (not yet implemented):
+- Temporal smoothing (Butterworth filter)
+- Head position constraint relative to shoulders
+- Spine-axis head constraint
+
+### D.6 File Backups Created
+
+| File | Backup Location | Purpose |
+|------|-----------------|---------|
+| `src/trc_motionbert.py` | `src/trc_motionbert.py.backup` | Before removing pre-scaling |
+| `Pose2Sim/.../Scaling_Setup_Pose2Sim_Coco17.xml` | `.../Scaling_Setup_Pose2Sim_Coco17.xml.backup` | Original Pose2Sim scaling |
+| `Pose2Sim/.../Markers_Coco17.xml` | `models/Markers_Coco17_fixed.xml` | Fixed marker positions |
+
+### D.7 Test Videos
+
+| Video | Height | Notes |
+|-------|--------|-------|
+| `louise_garden_walk.mp4` | 1.61m | Side-view walking, horizontal video, works well |
+| `aitor_garden_walk.mp4` | - | Side-view walking, works well |
+| `rebeca.mp4` | 1.65m | Pilates/stretching, vertical video, unusual poses - scaling challenges |
 
 ---
 

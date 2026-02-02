@@ -715,24 +715,38 @@ def transform_motionbert_to_opensim(keypoints: np.ndarray, target_height: float 
     foot_y_min = min(transformed[:, 3, 1].min(), transformed[:, 6, 1].min())
     transformed[:, :, 1] -= foot_y_min
 
-    # Note: We do NOT scale here - let Pose2Sim handle scaling based on participant_height
-    # This avoids issues with unusual poses where head-to-foot height doesn't reflect standing height
-
-    # Calculate current skeleton dimensions for reporting only
+    # Step 5: Scale to target height
+    # H36M: Head = 10, RFoot = 3, LFoot = 6
     head_y = transformed[:, 10, 1].mean()
     foot_y = min(transformed[:, 3, 1].mean(), transformed[:, 6, 1].mean())
     current_height = head_y - foot_y
 
-    print(f"  Current skeleton height (no scaling applied): {current_height:.3f}m")
-    print(f"  Pose2Sim will scale to target height: {target_height:.3f}m")
+    print(f"  Current skeleton height: {current_height:.3f}m")
 
     scaling_info = {
         'original_height': current_height,
         'target_height': target_height,
-        'scale_factor': 1.0,  # No pre-scaling
-        'final_height': current_height,  # Pose2Sim will handle final scaling
-        'note': 'Scaling delegated to Pose2Sim'
+        'scale_factor': 1.0,
+        'final_height': current_height,
     }
+
+    if current_height > 0.1:  # Sanity check
+        scale = target_height / current_height
+        transformed *= scale
+        print(f"  Scaling by {scale:.3f} to target height {target_height:.3f}m")
+
+        scaling_info['scale_factor'] = scale
+        scaling_info['final_height'] = target_height
+
+        # Re-ground feet after scaling
+        foot_y_min = min(transformed[:, 3, 1].min(), transformed[:, 6, 1].min())
+        transformed[:, :, 1] -= foot_y_min
+
+        # Re-center Z after scaling
+        hip_z = transformed[:, 0, 2].mean()
+        transformed[:, :, 2] -= hip_z
+    else:
+        print(f"  Warning: Height too small ({current_height:.3f}m), not scaling")
 
     return transformed, scaling_info
 
