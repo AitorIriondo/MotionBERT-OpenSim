@@ -33,7 +33,8 @@ Transformation: X_osim = Z_mb, Y_osim = -Y_mb, Z_osim = X_mb
 import numpy as np
 import pickle
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict
+from scipy.signal import butter, filtfilt
 
 
 # H36M to COCO17 marker mapping
@@ -559,6 +560,98 @@ def correct_forward_lean(keypoints: np.ndarray) -> np.ndarray:
     return corrected, correction_info
 
 
+def butterworth_filter_keypoints(keypoints: np.ndarray, fps: float = 30.0,
+                                  cutoff_freq: float = 6.0, order: int = 4) -> Tuple[np.ndarray, Dict]:
+    """
+    Apply Butterworth low-pass filter to smooth 3D keypoint trajectories.
+
+    This filter removes high-frequency jitter/noise from monocular pose estimation
+    while preserving natural movement dynamics. Applied per-keypoint, per-axis.
+
+    The filter uses scipy's filtfilt for zero-phase filtering (no temporal shift).
+
+    Args:
+        keypoints: Array of shape (n_frames, 17, 3) - 3D keypoints
+        fps: Frame rate of the video (default 30.0)
+        cutoff_freq: Filter cutoff frequency in Hz (default 6.0)
+            - Lower values = more smoothing, may lose fast movements
+            - Higher values = less smoothing, preserves more detail
+            - 6 Hz is good for walking, 10 Hz for faster movements
+        order: Butterworth filter order (default 4)
+            - Higher order = sharper cutoff but more ringing
+            - 4 is a good balance
+
+    Returns:
+        filtered: Smoothed keypoints array of same shape
+        filter_info: Dictionary with filter parameters and statistics
+    """
+    n_frames, n_joints, n_dims = keypoints.shape
+
+    # Compute normalized cutoff frequency (Nyquist = fps/2)
+    nyquist = fps / 2.0
+    normalized_cutoff = cutoff_freq / nyquist
+
+    # Ensure cutoff is valid (must be < 1.0 for normalized frequency)
+    if normalized_cutoff >= 1.0:
+        print(f"  Warning: Cutoff frequency {cutoff_freq} Hz >= Nyquist {nyquist} Hz")
+        print(f"  Reducing cutoff to {nyquist * 0.9:.1f} Hz")
+        normalized_cutoff = 0.9
+        cutoff_freq = nyquist * 0.9
+
+    # Design Butterworth filter
+    b, a = butter(order, normalized_cutoff, btype='low')
+
+    # Apply filter to each keypoint and axis
+    filtered = np.zeros_like(keypoints)
+
+    # Need minimum frames for filtering (3 * order for filtfilt padding)
+    min_frames = 3 * order + 1
+    if n_frames < min_frames:
+        print(f"  Warning: Only {n_frames} frames, need {min_frames} for filtering")
+        print(f"  Returning unfiltered keypoints")
+        return keypoints.copy(), {'applied': False, 'reason': 'insufficient_frames'}
+
+    # Compute pre-filter statistics for comparison
+    pre_velocity = np.diff(keypoints, axis=0)
+    pre_velocity_std = np.std(pre_velocity)
+
+    for j in range(n_joints):
+        for d in range(n_dims):
+            signal = keypoints[:, j, d]
+            # filtfilt applies filter forward and backward for zero-phase
+            filtered[:, j, d] = filtfilt(b, a, signal)
+
+    # Compute post-filter statistics
+    post_velocity = np.diff(filtered, axis=0)
+    post_velocity_std = np.std(post_velocity)
+
+    # Compute how much jitter was removed
+    jitter_reduction = (1 - post_velocity_std / pre_velocity_std) * 100 if pre_velocity_std > 0 else 0
+
+    # Compute max position change from filtering
+    max_position_change = np.max(np.abs(filtered - keypoints))
+    mean_position_change = np.mean(np.abs(filtered - keypoints))
+
+    print(f"  Butterworth low-pass filter applied:")
+    print(f"    Cutoff frequency: {cutoff_freq:.1f} Hz")
+    print(f"    Filter order: {order}")
+    print(f"    Jitter reduction: {jitter_reduction:.1f}%")
+    print(f"    Mean position change: {mean_position_change*1000:.2f} mm")
+    print(f"    Max position change: {max_position_change*1000:.2f} mm")
+
+    filter_info = {
+        'applied': True,
+        'cutoff_freq_hz': cutoff_freq,
+        'order': order,
+        'fps': fps,
+        'jitter_reduction_pct': jitter_reduction,
+        'mean_position_change_mm': mean_position_change * 1000,
+        'max_position_change_mm': max_position_change * 1000,
+    }
+
+    return filtered, filter_info
+
+
 def compute_body_frame_rotation(keypoints: np.ndarray, reference_frames: int = 10) -> np.ndarray:
     """
     Compute rotation matrix from body orientation in first N frames.
@@ -715,23 +808,28 @@ def transform_motionbert_to_opensim(keypoints: np.ndarray, target_height: float 
     foot_y_min = min(transformed[:, 3, 1].min(), transformed[:, 6, 1].min())
     transformed[:, :, 1] -= foot_y_min
 
-    # Note: We do NOT scale here - let Pose2Sim handle scaling based on participant_height
-    # This avoids issues with unusual poses where head-to-foot height doesn't reflect standing height
-
-    # Calculate current skeleton dimensions for reporting only
+    # Step 5: Scale to target height
+    # This is important for Pose2Sim because it scales segments based on marker distances.
+    # If we don't pre-scale, segments without markers (head, feet) get wrong proportions.
     head_y = transformed[:, 10, 1].mean()
     foot_y = min(transformed[:, 3, 1].mean(), transformed[:, 6, 1].mean())
     current_height = head_y - foot_y
 
-    print(f"  Current skeleton height (no scaling applied): {current_height:.3f}m")
-    print(f"  Pose2Sim will scale to target height: {target_height:.3f}m")
+    if current_height > 0.01:  # Avoid division by zero
+        scale_factor = target_height / current_height
+        transformed *= scale_factor
+        final_height = target_height
+        print(f"  Scaled from {current_height:.3f}m to {target_height:.3f}m (factor: {scale_factor:.2f}x)")
+    else:
+        scale_factor = 1.0
+        final_height = current_height
+        print(f"  Warning: Could not compute height, no scaling applied")
 
     scaling_info = {
         'original_height': current_height,
         'target_height': target_height,
-        'scale_factor': 1.0,  # No pre-scaling
-        'final_height': current_height,  # Pose2Sim will handle final scaling
-        'note': 'Scaling delegated to Pose2Sim'
+        'scale_factor': scale_factor,
+        'final_height': final_height,
     }
 
     return transformed, scaling_info

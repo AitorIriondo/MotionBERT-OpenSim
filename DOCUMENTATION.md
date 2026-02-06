@@ -1015,8 +1015,9 @@ config_dict = {
 ### 10.1 Environment Setup
 
 ```bash
-# Activate conda environment
-conda activate motionbert-opensim
+# Navigate to project directory and activate virtual environment
+cd C:\MotionBERTOpenSim\MotionBERT-OpenSim
+venv\Scripts\activate
 
 # Verify installations
 python -c "import torch; print(f'PyTorch: {torch.__version__}')"
@@ -1026,15 +1027,56 @@ python -c "import Pose2Sim; print('Pose2Sim: OK')"
 
 ### 10.2 Running the Full Pipeline (Video to OpenSim)
 
-```bash
-cd E:\MotionBERT-OpenSim
+#### Command-Line Arguments
 
+| Argument | Short | Required | Default | Description |
+|----------|-------|----------|---------|-------------|
+| `--input` | `-i` | Yes | - | Input video path (MP4, AVI, etc.) |
+| `--output` | `-o` | No | Auto | Output directory. If not specified, auto-generates as `output_YYYYMMDD_HHMMSS_videoname` |
+| `--height` | - | No | 1.75 | Target participant height in meters |
+| `--device` | `-d` | No | cuda:0 | Computation device (`cuda:0` for GPU, `cpu` for CPU) |
+| `--filter` | `-f` | No | Off | Enable Butterworth low-pass filter to smooth keypoints and reduce jitter |
+| `--filter-cutoff` | - | No | 6.0 | Filter cutoff frequency in Hz. Lower values = more smoothing. Range: 4-10 Hz recommended |
+| `--no-timing` | - | No | Off | Disable timing output in console |
+
+#### Usage Examples
+
+```bash
+cd C:\MotionBERTOpenSim\MotionBERT-OpenSim
+
+# Basic usage (auto-generate output folder)
+python run_full_pipeline.py --input video.mp4 --height 1.75
+
+# Specify custom output folder
+python run_full_pipeline.py --input video.mp4 --output results/my_output --height 1.75
+
+# With Butterworth smoothing filter (recommended for cleaner motion)
+python run_full_pipeline.py --input video.mp4 --height 1.75 --filter
+
+# With custom filter cutoff (lower = more smoothing)
+python run_full_pipeline.py --input video.mp4 --height 1.75 --filter --filter-cutoff 4.0
+
+# Use CPU instead of GPU
+python run_full_pipeline.py --input video.mp4 --height 1.75 --device cpu
+
+# Full example with all options
 python run_full_pipeline.py \
-    --input input/your_video.mp4 \
-    --output output/your_output \
-    --height 1.75 \
-    --device cuda:0
+    --input input/walking_video.mp4 \
+    --output output/walking_analysis \
+    --height 1.65 \
+    --device cuda:0 \
+    --filter \
+    --filter-cutoff 6.0
 ```
+
+#### Filter Recommendations
+
+| Movement Type | Recommended Cutoff | Notes |
+|---------------|-------------------|-------|
+| Slow walking | 4-6 Hz | More smoothing acceptable |
+| Normal walking | 6 Hz | Default, good balance |
+| Fast walking/jogging | 8-10 Hz | Preserve faster movements |
+| Sports/dynamic | 10+ Hz | Minimal smoothing |
 
 ### 10.3 Running from Existing Pickle (MotionBERT Output to OpenSim)
 

@@ -236,8 +236,22 @@ def generate_report(
 
 
 def run_pipeline(video_path: str, output_dir: str = None, target_height: float = 1.75,
-                 device: str = 'cuda:0', timed: bool = True):
-    """Run the full video to OpenSim pipeline."""
+                 device: str = 'cuda:0', timed: bool = True,
+                 apply_filter: bool = False, filter_cutoff: float = 6.0,
+                 export_fbx: bool = False, blender_path: str = None):
+    """Run the full video to OpenSim pipeline.
+
+    Args:
+        video_path: Path to input video
+        output_dir: Output directory (auto-generated if None)
+        target_height: Target height in meters
+        device: Computation device (cuda:0 or cpu)
+        timed: Whether to record timing information
+        apply_filter: Whether to apply Butterworth low-pass filter
+        filter_cutoff: Filter cutoff frequency in Hz (default 6.0)
+        export_fbx: Whether to export FBX using Blender
+        blender_path: Path to Blender executable (auto-detected if None)
+    """
 
     video_path = Path(video_path)
 
@@ -264,6 +278,10 @@ def run_pipeline(video_path: str, output_dir: str = None, target_height: float =
     print(f"Output directory: {output_dir}")
     print(f"Target height: {target_height}m")
     print(f"Device: {device}")
+    if apply_filter:
+        print(f"Butterworth filter: ON (cutoff={filter_cutoff} Hz)")
+    else:
+        print(f"Butterworth filter: OFF")
 
     # Check CUDA
     if 'cuda' in device:
@@ -558,6 +576,26 @@ def run_pipeline(video_path: str, output_dir: str = None, target_height: float =
         print(f"  Time: {format_time(timings['4b_lean_correction'])}")
 
     # =========================================================================
+    # STEP 4c: Butterworth Smoothing (Optional)
+    # =========================================================================
+    if apply_filter:
+        print("\n" + "=" * 70)
+        print("STEP 4c: Butterworth Low-Pass Filter")
+        print("=" * 70)
+
+        t0 = time.perf_counter()
+
+        from trc_motionbert import butterworth_filter_keypoints
+        keypoints_3d, filter_info = butterworth_filter_keypoints(
+            keypoints_3d, fps=fps, cutoff_freq=filter_cutoff, order=4
+        )
+        corrections['butterworth_filter'] = filter_info
+
+        if timed:
+            timings['4c_butterworth_filter'] = time.perf_counter() - t0
+            print(f"  Time: {format_time(timings['4c_butterworth_filter'])}")
+
+    # =========================================================================
     # STEP 5: Coordinate Transformation
     # =========================================================================
     print("\n" + "=" * 70)
@@ -695,7 +733,7 @@ def run_pipeline(video_path: str, output_dir: str = None, target_height: float =
                 print(f"  {f.relative_to(output_dir)} ({size_kb:.1f} KB)")
 
     mot_files = list(kinematics_dir.glob("*.mot")) if kinematics_dir.exists() else []
-    osim_files = list(kinematics_dir.glob("*_scaled.osim")) if kinematics_dir.exists() else []
+    osim_files = list(kinematics_dir.glob("*.osim")) if kinematics_dir.exists() else []
 
     if mot_files:
         print(f"\n*** Motion file: {mot_files[0]} ***")
@@ -716,8 +754,81 @@ def run_pipeline(video_path: str, output_dir: str = None, target_height: float =
     )
     print(f"\n*** Report: {report_path} ***")
 
+    # =========================================================================
+    # STEP 9 (Optional): FBX Export via Blender
+    # =========================================================================
+    fbx_path = None
+    if export_fbx and mot_files and osim_files:
+        print("\n" + "=" * 70)
+        print("STEP 9: FBX Export (Blender)")
+        print("=" * 70)
+
+        t0 = time.perf_counter()
+
+        # Find Blender
+        if blender_path is None:
+            # Try common locations
+            blender_paths = [
+                Path("C:/Program Files/Blender Foundation/Blender 5.0/blender.exe"),
+                Path("C:/Program Files/Blender Foundation/Blender 4.0/blender.exe"),
+                Path("C:/Program Files/Blender Foundation/Blender 3.6/blender.exe"),
+                Path("/Applications/Blender.app/Contents/MacOS/Blender"),
+                Path("/usr/bin/blender"),
+            ]
+            for bp in blender_paths:
+                if bp.exists():
+                    blender_path = str(bp)
+                    break
+
+        if blender_path and Path(blender_path).exists():
+            export_script = PROJECT_ROOT / "export_fbx_skely.py"
+            skely_template = PROJECT_ROOT.parent / "Import_OS4_Patreon_Aitor_Skely.blend"
+            fbx_path = output_dir / "motion.fbx"
+
+            if not skely_template.exists():
+                warnings.append(f"Skeleton template not found: {skely_template}")
+                print(f"  WARNING: Skeleton template not found: {skely_template}")
+                print(f"  Place Import_OS4_Patreon_Aitor_Skely.blend in {PROJECT_ROOT.parent}")
+            else:
+                import subprocess
+                cmd = [
+                    blender_path,
+                    "--background",
+                    str(skely_template),
+                    "--python", str(export_script),
+                    "--",
+                    "--mot", str(mot_files[0]),
+                    "--output", str(fbx_path),
+                    "--fps", str(int(fps)),
+                ]
+
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0 and fbx_path.exists():
+                        print(f"  FBX exported: {fbx_path}")
+                        if timed:
+                            timings['9_fbx_export'] = time.perf_counter() - t0
+                            print(f"  Time: {format_time(timings['9_fbx_export'])}")
+                    else:
+                        errors.append(f"FBX export failed: {result.stderr}")
+                        print(f"  ERROR: FBX export failed")
+                        if result.stderr:
+                            print(f"  {result.stderr[:500]}")
+                except subprocess.TimeoutExpired:
+                    errors.append("FBX export timed out")
+                    print("  ERROR: FBX export timed out")
+                except Exception as e:
+                    errors.append(f"FBX export error: {e}")
+                    print(f"  ERROR: {e}")
+        else:
+            warnings.append("Blender not found, skipping FBX export")
+            print("  WARNING: Blender not found, skipping FBX export")
+            print("  Install Blender from https://www.blender.org/download/")
+
     print("\n" + "=" * 70)
     print("DONE! Open the .osim file in OpenSim GUI, then load the .mot file")
+    if fbx_path and fbx_path.exists():
+        print(f"FBX file available: {fbx_path}")
     print("=" * 70)
 
     return timings, corrections, errors, warnings
@@ -741,6 +852,14 @@ Examples:
     parser.add_argument('--height', type=float, default=1.75, help='Target height in meters')
     parser.add_argument('--device', '-d', default='cuda:0', help='Device (cuda:0 or cpu)')
     parser.add_argument('--no-timing', action='store_true', help='Disable timing output')
+    parser.add_argument('--filter', '-f', action='store_true',
+                        help='Apply Butterworth low-pass filter to smooth keypoints (reduces jitter)')
+    parser.add_argument('--filter-cutoff', type=float, default=6.0,
+                        help='Filter cutoff frequency in Hz (default: 6.0, lower=smoother)')
+    parser.add_argument('--export-fbx', action='store_true',
+                        help='Export motion to FBX format using Blender (requires Blender installed)')
+    parser.add_argument('--blender-path', default=None,
+                        help='Path to Blender executable (auto-detected if not specified)')
 
     args = parser.parse_args()
 
@@ -748,7 +867,9 @@ Examples:
         print(f"Error: Input file not found: {args.input}")
         sys.exit(1)
 
-    run_pipeline(args.input, args.output, args.height, args.device, not args.no_timing)
+    run_pipeline(args.input, args.output, args.height, args.device, not args.no_timing,
+                 apply_filter=args.filter, filter_cutoff=args.filter_cutoff,
+                 export_fbx=args.export_fbx, blender_path=args.blender_path)
 
 
 if __name__ == "__main__":
