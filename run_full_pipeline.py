@@ -803,7 +803,7 @@ def run_pipeline(video_path: str, output_dir: str = None, target_height: float =
                 ]
 
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
                     if result.returncode == 0 and fbx_path.exists():
                         print(f"  FBX exported: {fbx_path}")
                         if timed:

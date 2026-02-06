@@ -297,6 +297,21 @@ def export_fbx(output_path):
         if obj.type in ['ARMATURE', 'MESH']:
             obj.select_set(True)
 
+    # Log frame range for debugging
+    frame_start = bpy.context.scene.frame_start
+    frame_end = bpy.context.scene.frame_end
+    print(f"  Scene frame range: {frame_start} - {frame_end} ({frame_end - frame_start + 1} frames)")
+
+    # Also check the Action frame range
+    for obj in bpy.data.objects:
+        if obj.type == 'ARMATURE' and obj.animation_data and obj.animation_data.action:
+            action = obj.animation_data.action
+            print(f"  Action '{action.name}' range: {action.frame_range[0]:.0f} - {action.frame_range[1]:.0f}")
+            # Force the action's manual frame range to match
+            action.use_frame_range = True
+            action.frame_start = frame_start
+            action.frame_end = frame_end
+
     bpy.ops.export_scene.fbx(
         filepath=output_path,
         use_selection=True,
